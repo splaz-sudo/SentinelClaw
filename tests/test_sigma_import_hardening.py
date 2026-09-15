@@ -68,6 +68,27 @@ def build_zip(
     return zip_path
 
 
+def build_zip_with_raw_member_name(
+    zip_path: Path,
+    name: str,
+    payload: str | bytes,
+) -> Path:
+    """Build a one-member zip whose stored name is exactly ``name``.
+
+    ``ZipInfo.__init__`` rewrites ``os.sep`` to "/" (on Windows every
+    backslash becomes a forward slash, both when writing and when reading
+    a zip's central directory), so the raw name must be assigned *after*
+    construction to pin the archive bytes on every platform. On read,
+    ``ZipInfo.orig_filename`` always reflects those stored bytes.
+    """
+    with zipfile.ZipFile(zip_path, "w") as archive:
+        info = zipfile.ZipInfo("placeholder.yml")
+        info.filename = name
+        archive.writestr(info, payload)
+
+    return zip_path
+
+
 def write_rules_tree(
     root: Path,
     rule_text: str = GOOD_RULE,
@@ -118,25 +139,145 @@ def test_member_name_rejection_refuses_nul_byte() -> None:
     assert importer._member_name_rejection("sigma-x/rules/bad\x00.yml") == "NUL character"
 
 
+def test_extract_rejects_drive_letter_entry(tmp_path: Path) -> None:
+    archive_path = build_zip(
+        tmp_path / "drive.zip",
+        {"C:/rules/pwned.yml": GOOD_RULE},
+    )
+
+    with pytest.raises(SigmaImportError, match="drive-letter"):
+        extract_rules_directory(archive_path, tmp_path / "work")
+
+
+def test_extract_contains_raw_backslash_entry(tmp_path: Path) -> None:
+    """A member stored with literal backslashes must never escape the root.
+
+    The archive genuinely stores the backslash name on every platform
+    (asserted via ``ZipInfo.orig_filename``). Windows' ``zipfile`` then
+    re-sanitizes the name while reading the central directory, so there
+    the validator sees forward slashes and containment is the guarantee
+    that holds; POSIX keeps the raw name and the validator refuses it.
+    """
+    raw_name = "evil\\rules\\pwned.yml"
+
+    archive_path = build_zip_with_raw_member_name(
+        tmp_path / "backslash.zip",
+        raw_name,
+        GOOD_RULE,
+    )
+
+    with zipfile.ZipFile(archive_path) as archive:
+        stored = archive.infolist()[0]
+
+        # ``orig_filename`` is never sanitized: the raw stored name is
+        # present on every platform.
+        assert stored.orig_filename == raw_name
+
+        if os.name == "nt":
+            assert stored.filename == "evil/rules/pwned.yml"
+        else:
+            assert stored.filename == raw_name
+
+    work_directory = tmp_path / "a" / "b" / "c" / "work"
+
+    if os.name == "nt":
+        # Windows' zipfile normalizes the separator before the validator
+        # runs, so extraction is contained rather than refused.
+        rules_root = extract_rules_directory(archive_path, work_directory)
+        assert (rules_root / "pwned.yml").is_file()
+    else:
+        with pytest.raises(SigmaImportError, match="backslash"):
+            extract_rules_directory(archive_path, work_directory)
+
+    escaped = [
+        path
+        for path in tmp_path.rglob("pwned.yml")
+        if not path.is_relative_to(work_directory)
+    ]
+
+    assert escaped == []
+
+
+# ---------------------------------------------------------------------------
+# Validator units: raw-name checks independent of zipfile's per-platform
+# normalization (writer-side on Windows, and again while reading infolist())
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.parametrize(
-    ("entry", "reason"),
+    ("name", "reason"),
     [
+        ("evil/rules/../../../pwned.yml", "'..' traversal component"),
+        ("/rules/absolute.yml", "absolute path"),
+        ("\\rules\\absolute.yml", "absolute path"),
+        ("\\\\server\\share\\rules\\x.yml", "absolute path"),
+        ("evil\\rules\\pwned.yml", "backslash path separator"),
+        ("C:\\rules\\pwned.yml", "backslash path separator"),
+        ("C:/rules/pwned.yml", "Windows drive-letter component"),
+        ("c:/rules/pwned.yml", "Windows drive-letter component"),
+    ],
+)
+def test_member_name_rejection_refuses_raw_unsafe_names(
+    name: str,
+    reason: str,
+) -> None:
+    assert importer._member_name_rejection(name) == reason
+
+
+def test_member_name_rejection_allows_normal_release_name() -> None:
+    assert importer._member_name_rejection("sigma-x/rules/linux/good.yml") is None
+
+
+@pytest.mark.parametrize(
+    ("name", "reason"),
+    [
+        ("evil/rules/../../../pwned.yml", "traversal"),
+        ("/rules/absolute.yml", "absolute"),
+        ("\\rules\\absolute.yml", "absolute"),
         ("evil\\rules\\pwned.yml", "backslash"),
         ("C:/rules/pwned.yml", "drive-letter"),
     ],
 )
-def test_extract_rejects_windows_style_entries(
+def test_validated_relative_path_rejects_raw_unsafe_names(
     tmp_path: Path,
-    entry: str,
+    name: str,
     reason: str,
 ) -> None:
-    archive_path = build_zip(
-        tmp_path / "windows.zip",
-        {entry: GOOD_RULE},
-    )
+    rules_root = tmp_path / "work" / "rules"
 
     with pytest.raises(SigmaImportError, match=reason):
-        extract_rules_directory(archive_path, tmp_path / "work")
+        importer._validated_relative_path(
+            name,
+            rules_root,
+            rules_root.resolve(),
+            tmp_path / "evil.zip",
+        )
+
+
+def test_validated_relative_path_accepts_rules_member(tmp_path: Path) -> None:
+    rules_root = tmp_path / "work" / "rules"
+
+    relative = importer._validated_relative_path(
+        "sigma-x/rules/linux/good.yml",
+        rules_root,
+        rules_root.resolve(),
+        tmp_path / "release.zip",
+    )
+
+    assert relative == Path("linux/good.yml")
+
+
+def test_validated_relative_path_ignores_non_rules_member(tmp_path: Path) -> None:
+    rules_root = tmp_path / "work" / "rules"
+
+    relative = importer._validated_relative_path(
+        "sigma-x/README.md",
+        rules_root,
+        rules_root.resolve(),
+        tmp_path / "release.zip",
+    )
+
+    assert relative is None
 
 
 # ---------------------------------------------------------------------------
