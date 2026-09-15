@@ -778,6 +778,16 @@ def run_log_scan(
     if "error" in log_data:
         return log_data
 
+    if log_data.get("skipped"):
+        logger.info(
+            "Log analysis skipped for %s: %s",
+            path,
+            log_data.get(
+                "skipped_reason",
+                "unknown reason",
+            ),
+        )
+
     try:
         findings = process_findings(
             add_source(

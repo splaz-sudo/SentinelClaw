@@ -4,9 +4,21 @@ import logging
 import re
 from pathlib import Path
 
+from sentinelclaw.config.settings import get_settings
+
 logger = logging.getLogger(
     __name__
 )
+
+# DoS guard: keyword matching runs on (and retains) at most this many
+# characters of each line, so a single hostile multi-GB line cannot
+# force an unbounded match record.
+MAX_LOG_LINE_CHARS = 8192
+
+# DoS guard: cap the retained suspicious matches/events. Once the cap
+# is reached the scan stops early and reports the truncation (mirroring
+# the pcap packet/flow caps) instead of growing memory without bound.
+MAX_LOG_MATCHES = 5000
 
 KEYWORD_CLASSES: dict[
     str,
@@ -221,6 +233,40 @@ def build_event(
     }
 
 
+def _skipped_result(
+    path: Path,
+    size_bytes: int,
+    max_size: int,
+) -> dict:
+    """Operational "too large" note, matching ``file_analyzer``'s shape.
+
+    The log is never opened; the result carries the same keys as a
+    normal analysis (empty collections) plus ``skipped`` /
+    ``skipped_reason`` so the caller renders an operational note
+    instead of a security finding.
+    """
+    logger.info(
+        "Skipping full analysis of %s "
+        "(%d bytes exceeds %d byte limit)",
+        path.name,
+        size_bytes,
+        max_size,
+    )
+
+    return {
+        "file": str(path),
+        "size_bytes": size_bytes,
+        "total_lines": 0,
+        "suspicious_matches": 0,
+        "matches": [],
+        "events": [],
+        "truncated": False,
+        "truncation_reason": None,
+        "skipped": True,
+        "skipped_reason": "too large",
+    }
+
+
 def analyze_log_file(file_path: str) -> dict:
     path = Path(file_path)
 
@@ -234,13 +280,45 @@ def analyze_log_file(file_path: str) -> dict:
             "error": f"Not a file: {file_path}"
         }
 
-    matches = []
-    events = []
+    max_size = get_settings().max_file_analysis_size
+
+    try:
+        size_bytes = path.stat().st_size
+    except OSError as exc:
+        return {
+            "error": str(exc)
+        }
+
+    if size_bytes > max_size:
+        return _skipped_result(
+            path,
+            size_bytes,
+            max_size,
+        )
+
+    matches: list[dict] = []
+    events: list[dict] = []
     total_lines = 0
+
+    truncated = False
+    truncation_reason: str | None = None
 
     with path.open("r", encoding="utf-8", errors="ignore") as log_file:
         for line_number, line in enumerate(log_file, start=1):
+            if len(matches) >= MAX_LOG_MATCHES:
+                truncated = True
+                truncation_reason = (
+                    f"match limit reached "
+                    f"({MAX_LOG_MATCHES})"
+                )
+                break
+
             total_lines += 1
+
+            # Bound both the scanned text and the retained text: the
+            # keyword match, the structured event and the raw match
+            # record all operate on the same truncated prefix.
+            line = line[:MAX_LOG_LINE_CHARS]
             lower_line = line.lower()
 
             matched_keywords = [
@@ -269,19 +347,24 @@ def analyze_log_file(file_path: str) -> dict:
     logger.debug(
         "Analyzed log %s: %d line(s), "
         "%d suspicious match(es), "
-        "%d structured event(s)",
+        "%d structured event(s) "
+        "(truncated: %s)",
         path.name,
         total_lines,
         len(matches),
         len(events),
+        truncated,
     )
 
     return {
         "file": str(path),
+        "size_bytes": size_bytes,
         "total_lines": total_lines,
         "suspicious_matches": len(matches),
         "matches": matches,
         "events": events,
+        "truncated": truncated,
+        "truncation_reason": truncation_reason,
     }
 
 

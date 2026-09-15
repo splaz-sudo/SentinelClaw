@@ -44,18 +44,58 @@ COLORS = {
 }
 
 
+def sanitize_terminal_text(
+    value: Any,
+) -> str:
+    """Return ``value`` as text with terminal control characters removed.
+
+    C0 control characters (0x00-0x1f) are stripped except newline and
+    tab; DEL (0x7f) and the C1 range (0x80-0x9f) are stripped as well.
+    Untrusted strings (rule text, file names, AI output) are rendered
+    through this helper before printing so escape sequences cannot spoof
+    the terminal or write the clipboard.
+    """
+    return "".join(
+        character
+        for character in str(value)
+        if (
+            character in "\n\t"
+            or 0x20 <= ord(character) <= 0x7E
+            or ord(character) >= 0xA0
+        )
+    )
+
+
+class _StyledText(str):
+    """Text built by :func:`colorize`; its content is already sanitized."""
+
+
 def colorize(
     text: str,
     color: str,
 ) -> str:
-    if not COLOR_ENABLED:
-        return text
+    clean = sanitize_terminal_text(
+        text
+    )
 
-    return (
+    if not COLOR_ENABLED:
+        return _StyledText(clean)
+
+    return _StyledText(
         COLORS.get(color, "")
-        + text
+        + clean
         + COLORS["reset"]
     )
+
+
+def _display_text(
+    value: Any,
+) -> str:
+    """Sanitize untrusted text while preserving colorized output."""
+    if isinstance(value, _StyledText):
+        return str(value)
+
+    return sanitize_terminal_text(value)
 
 
 def severity_color(
@@ -117,8 +157,8 @@ def status(
     width: int = 22,
 ) -> None:
     print(
-        f"{label:<{width}}"
-        f"{value}"
+        f"{_display_text(label):<{width}}"
+        f"{_display_text(value)}"
     )
 
 
@@ -202,8 +242,8 @@ def compact_finding(
 
     print(
         f"{severity_text} "
-        f"{rule_id:<16} "
-        f"{title}"
+        f"{sanitize_terminal_text(rule_id):<16} "
+        f"{sanitize_terminal_text(title)}"
     )
 
     if not verbose:
@@ -216,7 +256,7 @@ def compact_finding(
     if description:
         print(
             f"    Reason      : "
-            f"{description}"
+            f"{sanitize_terminal_text(description)}"
         )
 
     confidence = finding.get(
@@ -226,7 +266,7 @@ def compact_finding(
     if confidence:
         print(
             f"    Confidence  : "
-            f"{confidence}"
+            f"{sanitize_terminal_text(confidence)}"
         )
 
     pid = finding.get(
@@ -236,7 +276,7 @@ def compact_finding(
     if pid is not None:
         print(
             f"    PID         : "
-            f"{pid}"
+            f"{sanitize_terminal_text(pid)}"
         )
 
     process_name = finding.get(
@@ -246,7 +286,7 @@ def compact_finding(
     if process_name:
         print(
             f"    Process     : "
-            f"{process_name}"
+            f"{sanitize_terminal_text(process_name)}"
         )
 
     source_ip = finding.get(
@@ -256,7 +296,7 @@ def compact_finding(
     if source_ip:
         print(
             f"    Source IP   : "
-            f"{source_ip}"
+            f"{sanitize_terminal_text(source_ip)}"
         )
 
     destination_ip = finding.get(
@@ -266,7 +306,7 @@ def compact_finding(
     if destination_ip:
         print(
             f"    Destination : "
-            f"{destination_ip}"
+            f"{sanitize_terminal_text(destination_ip)}"
         )
 
     remote_ip = finding.get(
@@ -288,7 +328,7 @@ def compact_finding(
 
         print(
             f"    Remote      : "
-            f"{remote}"
+            f"{sanitize_terminal_text(remote)}"
         )
 
     mitre = finding.get(
@@ -314,15 +354,15 @@ def compact_finding(
         if technique or name:
             print(
                 f"    MITRE       : "
-                f"{technique or 'Unknown'}"
+                f"{sanitize_terminal_text(technique or 'Unknown')}"
                 f" - "
-                f"{name or 'Unknown'}"
+                f"{sanitize_terminal_text(name or 'Unknown')}"
             )
 
         if tactic:
             print(
                 f"    Tactic      : "
-                f"{tactic}"
+                f"{sanitize_terminal_text(tactic)}"
             )
 
     evidence = finding.get(
@@ -370,8 +410,8 @@ def compact_incident(
 
     print(
         f"{severity_text} "
-        f"{incident_id:<18} "
-        f"{title}"
+        f"{sanitize_terminal_text(incident_id):<18} "
+        f"{sanitize_terminal_text(title)}"
     )
 
     if not verbose:
@@ -384,7 +424,7 @@ def compact_incident(
     if description:
         print(
             f"    Reason      : "
-            f"{description}"
+            f"{sanitize_terminal_text(description)}"
         )
 
     confidence = incident.get(
@@ -394,7 +434,7 @@ def compact_incident(
     if confidence:
         print(
             f"    Confidence  : "
-            f"{confidence}"
+            f"{sanitize_terminal_text(confidence)}"
         )
 
     finding_count = incident.get(
@@ -404,7 +444,7 @@ def compact_incident(
 
     print(
         f"    Findings    : "
-        f"{finding_count}"
+        f"{sanitize_terminal_text(finding_count)}"
     )
 
     related_rule_ids = incident.get(
@@ -416,7 +456,10 @@ def compact_incident(
         print(
             "    Rules       : "
             + ", ".join(
-                related_rule_ids
+                sanitize_terminal_text(
+                    rule_id
+                )
+                for rule_id in related_rule_ids
             )
         )
 
@@ -661,7 +704,7 @@ def print_pcap_dashboard(
         print()
         print(
             f"[ERROR] "
-            f"{report['error']}"
+            f"{sanitize_terminal_text(report['error'])}"
         )
         print()
         return
@@ -851,7 +894,7 @@ def print_file_dashboard(
         print()
         print(
             f"[ERROR] "
-            f"{report['error']}"
+            f"{sanitize_terminal_text(report['error'])}"
         )
         print()
         return
@@ -969,7 +1012,7 @@ def print_log_dashboard(
         print()
         print(
             f"[ERROR] "
-            f"{report['error']}"
+            f"{sanitize_terminal_text(report['error'])}"
         )
         print()
         return
@@ -1160,7 +1203,7 @@ def print_directory_dashboard(
         print()
         print(
             f"[ERROR] "
-            f"{report['error']}"
+            f"{sanitize_terminal_text(report['error'])}"
         )
         print()
         return
@@ -1289,7 +1332,8 @@ def print_directory_dashboard(
 
             if error:
                 print(
-                    f"- {name}: [ERROR] {error}"
+                    f"- {sanitize_terminal_text(name)}: "
+                    f"[ERROR] {sanitize_terminal_text(error)}"
                 )
 
             elif file_findings:
@@ -1305,14 +1349,15 @@ def print_directory_dashboard(
                 )
 
                 print(
-                    f"- {name}: "
+                    f"- {sanitize_terminal_text(name)}: "
                     f"{len(file_findings)} finding(s) "
                     f"({counts})"
                 )
 
             else:
                 print(
-                    f"- {name}: no findings"
+                    f"- {sanitize_terminal_text(name)}: "
+                    "no findings"
                 )
 
     section(
@@ -1349,7 +1394,7 @@ def print_evtx_dashboard(
         print()
         print(
             f"[ERROR] "
-            f"{report['error']}"
+            f"{sanitize_terminal_text(report['error'])}"
         )
         print()
         return

@@ -55,12 +55,18 @@ ollama_token_budget      SENTINELCLAW_OLLAMA_TOKEN_BUDGET
 ollama_evidence_max_chars
                          SENTINELCLAW_OLLAMA_EVIDENCE_MAX_CHARS
 intel_bundle_path        SENTINELCLAW_INTEL_BUNDLE_PATH
+max_intel_bundle_size_bytes
+                         SENTINELCLAW_MAX_INTEL_BUNDLE_SIZE_BYTES
 =======================  =====================================
 
 TOML keys use the plain setting names (``file_entropy_threshold = 7.5``
 etc.). The directory keys accept filesystem paths; ``intel_bundle_path``
 accepts the path of a local STIX/OpenIOC intel bundle (optional);
 all other keys accept their declared scalar types.
+
+``max_intel_bundle_size_bytes`` caps the size of the optional offline
+threat-intel bundle (default 256 MiB); larger bundles are skipped with
+an operational warning and must be a positive integer.
 
 ``ollama_token_budget`` is an approximate prompt-token budget for the
 AI evidence section; SentinelClaw converts it with a documented
@@ -122,6 +128,7 @@ SCALAR_FIELDS = frozenset(
         "ollama_max_response_bytes",
         "ollama_token_budget",
         "ollama_evidence_max_chars",
+        "max_intel_bundle_size_bytes",
     }
 )
 
@@ -186,6 +193,7 @@ class Settings:
     ollama_token_budget: int = 8000
     ollama_evidence_max_chars: int = 2000
     intel_bundle_path: Path | None = None
+    max_intel_bundle_size_bytes: int = 268435456
 
     @property
     def resolved_rules_dir(self) -> Path:
@@ -347,6 +355,43 @@ def _resolve_int(
         )
 
     return default
+
+
+def _resolve_positive_int(
+    field: str,
+    toml_value: object,
+    path: Path | None,
+    default: int,
+) -> int:
+    value = _resolve_int(
+        field,
+        toml_value,
+        path,
+        default,
+    )
+
+    if value <= 0:
+        env_value = _env_value(
+            field
+        )
+
+        if env_value is not None:
+            raise _invalid_env(
+                field,
+                env_value,
+                "a positive integer",
+            )
+
+        raise _invalid_toml(
+            path
+            if path is not None
+            else Path("<config>"),
+            field,
+            value,
+            "a positive integer",
+        )
+
+    return value
 
 
 def _resolve_float(
@@ -807,6 +852,14 @@ def load_settings(
                 "intel_bundle_path"
             ),
             path,
+        ),
+        max_intel_bundle_size_bytes=_resolve_positive_int(
+            "max_intel_bundle_size_bytes",
+            toml_data.get(
+                "max_intel_bundle_size_bytes"
+            ),
+            path,
+            268435456,
         ),
     )
 

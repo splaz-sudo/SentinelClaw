@@ -12,6 +12,10 @@ from sentinelclaw.config.constants import (
     REPORT_SCHEMA_VERSION,
     SEVERITY_RANK,
 )
+from sentinelclaw.config.paths import (
+    ensure_private_directory,
+    write_private_text,
+)
 from sentinelclaw.config.settings import get_settings
 
 
@@ -19,6 +23,28 @@ def _safe(value: Any) -> str:
     if value is None:
         return ""
     return str(value)
+
+
+# Characters that make spreadsheet applications treat a cell as a
+# formula (CWE-1236). A leading quote forces text interpretation.
+_CSV_FORMULA_PREFIXES = (
+    "=",
+    "+",
+    "-",
+    "@",
+    "\t",
+    "\r",
+)
+
+
+def _csv_safe(value: Any) -> str:
+    """Return a CSV cell value that cannot be interpreted as a formula."""
+    text = _safe(value)
+
+    if text and text[0] in _CSV_FORMULA_PREFIXES:
+        return "'" + text
+
+    return text
 
 
 def _severity_rank(severity: str) -> int:
@@ -561,20 +587,28 @@ def generate_csv_report(report: dict) -> str:
     ):
         findings_writer.writerow(
             {
-                "id": _finding_csv_id(finding),
-                "severity": _safe(
+                "id": _csv_safe(
+                    _finding_csv_id(finding)
+                ),
+                "severity": _csv_safe(
                     finding.get("severity")
                 ),
-                "title": _safe(
+                "title": _csv_safe(
                     finding.get("title")
                 ),
-                "category": _safe(
+                "category": _csv_safe(
                     finding.get("category")
                 ),
-                "source": _finding_source(finding),
-                "mitre": _mitre_text(finding),
-                "timestamp": _finding_timestamp(
-                    finding
+                "source": _csv_safe(
+                    _finding_source(finding)
+                ),
+                "mitre": _csv_safe(
+                    _mitre_text(finding)
+                ),
+                "timestamp": _csv_safe(
+                    _finding_timestamp(
+                        finding
+                    )
                 ),
             }
         )
@@ -591,26 +625,28 @@ def generate_csv_report(report: dict) -> str:
     for incident in _get_incidents(report):
         incidents_writer.writerow(
             {
-                "incident_id": _safe(
+                "incident_id": _csv_safe(
                     incident.get("incident_id")
                 ),
-                "severity": _safe(
+                "severity": _csv_safe(
                     incident.get("severity")
                 ),
-                "title": _safe(
+                "title": _csv_safe(
                     incident.get("title")
                 ),
-                "confidence": _safe(
+                "confidence": _csv_safe(
                     incident.get("confidence")
                 ),
-                "finding_count": _safe(
+                "finding_count": _csv_safe(
                     incident.get("finding_count")
                 ),
-                "related_rule_ids": " ".join(
-                    str(item)
-                    for item in (
-                        incident.get("related_rule_ids")
-                        or []
+                "related_rule_ids": _csv_safe(
+                    " ".join(
+                        str(item)
+                        for item in (
+                            incident.get("related_rule_ids")
+                            or []
+                        )
                     )
                 ),
             }
@@ -1654,9 +1690,8 @@ def save_report_formats(
         output_directory
     )
 
-    output_path.mkdir(
-        parents=True,
-        exist_ok=True,
+    ensure_private_directory(
+        output_path
     )
 
     timestamp = datetime.now().strftime(
@@ -1671,9 +1706,9 @@ def save_report_formats(
             / f"sentinelclaw_{timestamp}.json"
         )
 
-        path.write_text(
+        write_private_text(
+            path,
             generate_json_report(report),
-            encoding="utf-8",
         )
 
         created["json"] = path
@@ -1684,9 +1719,9 @@ def save_report_formats(
             / f"sentinelclaw_{timestamp}.txt"
         )
 
-        path.write_text(
+        write_private_text(
+            path,
             generate_text_report(report),
-            encoding="utf-8",
         )
 
         created["text"] = path
@@ -1697,9 +1732,9 @@ def save_report_formats(
             / f"sentinelclaw_{timestamp}.html"
         )
 
-        path.write_text(
+        write_private_text(
+            path,
             generate_html_report(report),
-            encoding="utf-8",
         )
 
         created["html"] = path
@@ -1710,9 +1745,9 @@ def save_report_formats(
             / f"sentinelclaw_{timestamp}.csv"
         )
 
-        path.write_text(
+        write_private_text(
+            path,
             generate_csv_report(report),
-            encoding="utf-8",
         )
 
         created["csv"] = path
@@ -1723,9 +1758,9 @@ def save_report_formats(
             / f"sentinelclaw_{timestamp}.jsonl"
         )
 
-        path.write_text(
+        write_private_text(
+            path,
             generate_jsonl_report(report),
-            encoding="utf-8",
         )
 
         created["jsonl"] = path

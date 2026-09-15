@@ -46,6 +46,10 @@ from pathlib import Path
 from typing import Any
 
 from sentinelclaw.config.constants import REPORT_SCHEMA_VERSION
+from sentinelclaw.config.paths import (
+    ensure_private_directory,
+    open_private_append,
+)
 from sentinelclaw.config.settings import get_settings
 from sentinelclaw.engine.timeline_engine import parse_timestamp
 
@@ -326,9 +330,8 @@ def append_scan_record(
     """
     path = store_path()
 
-    path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
+    ensure_private_directory(
+        path.parent
     )
 
     record_id = record.get(
@@ -371,9 +374,8 @@ def append_scan_record(
             socket.gethostname()
         )
 
-    with path.open(
-        "a",
-        encoding="utf-8",
+    with open_private_append(
+        path
     ) as file:
         file.write(
             json.dumps(

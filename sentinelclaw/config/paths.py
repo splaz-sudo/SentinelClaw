@@ -1,7 +1,111 @@
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
+from typing import TextIO
+
+
+logger = logging.getLogger(
+    __name__
+)
+
+PRIVATE_DIRECTORY_MODE = 0o700
+PRIVATE_FILE_MODE = 0o600
+
+
+def ensure_private_directory(
+    path: Path,
+) -> Path:
+    """Create ``path`` (and parents) with owner-only permissions.
+
+    Only a directory actually created by this call is chmod-ed to
+    ``0o700``; an existing directory is left untouched. ``chmod``
+    failures (common on Windows) are logged at debug level and never
+    raised, so a scan is never aborted over permissions hardening.
+    """
+    if path.is_dir():
+        return path
+
+    try:
+        path.mkdir(
+            parents=True,
+            mode=PRIVATE_DIRECTORY_MODE,
+        )
+    except FileExistsError:
+        if path.is_dir():
+            return path
+        raise
+
+    try:
+        os.chmod(
+            path,
+            PRIVATE_DIRECTORY_MODE,
+        )
+    except OSError as exc:
+        logger.debug(
+            "Unable to restrict permissions on directory %s: %s",
+            path,
+            exc,
+        )
+
+    return path
+
+
+def open_private_append(
+    path: Path,
+) -> TextIO:
+    """Open ``path`` for text appending, creating it owner-only (0o600)."""
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+        PRIVATE_FILE_MODE,
+    )
+
+    try:
+        return os.fdopen(
+            descriptor,
+            "a",
+            encoding="utf-8",
+        )
+    except BaseException:
+        os.close(
+            descriptor
+        )
+        raise
+
+
+def write_private_text(
+    path: Path,
+    text: str,
+) -> None:
+    """Write ``text`` to ``path``, creating it owner-only (0o600).
+
+    An existing file keeps its current permissions; the mode applies
+    only when the file is first created.
+    """
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        PRIVATE_FILE_MODE,
+    )
+
+    try:
+        file = os.fdopen(
+            descriptor,
+            "w",
+            encoding="utf-8",
+        )
+    except BaseException:
+        os.close(
+            descriptor
+        )
+        raise
+
+    with file:
+        file.write(
+            text
+        )
 
 
 PACKAGE_DIRECTORY = Path(__file__).resolve().parent.parent

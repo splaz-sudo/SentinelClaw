@@ -61,6 +61,17 @@ RELEASE_ZIP_URL = "https://github.com/SigmaHQ/sigma/archive/refs/tags/{tag}.zip"
 
 MAX_SIGMA_FILES = 20_000
 
+#: Hard cap on a downloaded release archive (256 MiB). A larger response
+#: is rejected and its partial file removed instead of written to disk.
+MAX_DOWNLOAD_BYTES = 256 * 1024 * 1024
+
+#: Hard cap on one extracted ``*.yml`` rule file (8 MiB). Enforced on the
+#: bytes actually read, never on the archive's self-reported size.
+MAX_RULE_FILE_BYTES = 8 * 1024 * 1024
+
+#: Hard cap on the cumulative bytes extracted from one archive (256 MiB).
+MAX_TOTAL_EXTRACTED_BYTES = 256 * 1024 * 1024
+
 
 class SigmaImportError(Exception):
     """The import as a whole failed (network, extraction, I/O)."""
@@ -81,7 +92,11 @@ def download_release_zip(
 ) -> Path:
     """Download the SigmaHQ release zip for ``tag`` to ``destination``.
 
-    Raises :class:`SigmaImportError` on any network failure.
+    The response is read with a bounded read of
+    :data:`MAX_DOWNLOAD_BYTES` plus one byte; anything larger is refused
+    (and any partial file removed) rather than materialized. Raises
+    :class:`SigmaImportError` on any network failure or when the size cap
+    is exceeded.
     """
     url = RELEASE_ZIP_URL.format(tag=tag)
 
@@ -90,11 +105,101 @@ def download_release_zip(
             url,
             timeout=timeout,
         ) as response:
-            destination.write_bytes(response.read())
+            payload = response.read(MAX_DOWNLOAD_BYTES + 1)
     except OSError as exc:
         raise SigmaImportError(f"Unable to download {url}: {exc}") from exc
 
+    if len(payload) > MAX_DOWNLOAD_BYTES:
+        try:
+            destination.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning(
+                "Unable to remove oversized partial download %s: %s",
+                destination,
+                exc,
+            )
+
+        raise SigmaImportError(
+            f"Sigma release {tag} exceeds the {MAX_DOWNLOAD_BYTES}-byte download cap"
+        )
+
+    try:
+        destination.write_bytes(payload)
+    except OSError as exc:
+        raise SigmaImportError(f"Unable to write {destination}: {exc}") from exc
+
     return destination
+
+
+def _member_name_rejection(
+    name: str,
+) -> str | None:
+    """Return why an archive member name is unsafe, or ``None`` if safe.
+
+    Absolute names, backslash separators, ``..`` traversal components
+    and Windows drive letters are never legitimate in a SigmaHQ release
+    zip and are refused outright.
+    """
+    if "\x00" in name:
+        return "NUL character"
+
+    if name.startswith("/") or name.startswith("\\"):
+        return "absolute path"
+
+    if "\\" in name:
+        return "backslash path separator"
+
+    for part in name.split("/"):
+        if part == "..":
+            return "'..' traversal component"
+
+        if len(part) >= 2 and part[1] == ":" and part[0].isalpha():
+            return "Windows drive-letter component"
+
+    return None
+
+
+def _validated_relative_path(
+    name: str,
+    rules_root: Path,
+    resolved_rules_root: Path,
+    zip_path: Path,
+) -> Path | None:
+    """Validate a ``*.yml`` archive member against the extraction root.
+
+    Returns the member path relative to ``rules/``, or ``None`` when the
+    member is not part of a ``rules/`` tree. Raises
+    :class:`SigmaImportError` (naming the entry) *before* any directory
+    or file is created for absolute, traversing, backslash or
+    drive-letter names, or when the resolved destination escapes
+    ``resolved_rules_root``.
+    """
+    rejection = _member_name_rejection(name)
+
+    if rejection is not None:
+        raise SigmaImportError(f"Refusing unsafe entry {name!r} in {zip_path}: {rejection}")
+
+    marker = "/rules/"
+    marker_index = name.find(marker)
+
+    if marker_index < 0:
+        return None
+
+    relative = Path(name[marker_index + len(marker) :])
+
+    if relative.is_absolute() or ".." in relative.parts:
+        raise SigmaImportError(
+            f"Refusing unsafe entry {name!r} in {zip_path}: path escapes the rules tree"
+        )
+
+    destination = rules_root / relative
+
+    if not destination.resolve().is_relative_to(resolved_rules_root):
+        raise SigmaImportError(
+            f"Refusing entry {name!r} in {zip_path}: destination is outside {resolved_rules_root}"
+        )
+
+    return relative
 
 
 def extract_rules_directory(
@@ -105,7 +210,10 @@ def extract_rules_directory(
 
     Returns the extracted ``rules/`` directory. Works for GitHub
     ``archive/refs/tags`` zips (which nest under a ``sigma-<tag>/``
-    prefix) and for any zip that carries a ``rules/`` tree.
+    prefix) and for any zip that carries a ``rules/`` tree. Every member
+    is containment-checked before extraction, and both per-file and
+    cumulative extraction sizes are capped (see the ``MAX_*`` constants);
+    violations raise :class:`SigmaImportError` instead of being skipped.
     """
     try:
         archive = zipfile.ZipFile(zip_path)
@@ -113,7 +221,9 @@ def extract_rules_directory(
         raise SigmaImportError(f"Invalid Sigma release zip {zip_path}: {exc}") from exc
 
     rules_root = work_directory / "rules"
+    resolved_rules_root = rules_root.resolve()
     extracted = 0
+    total_extracted_bytes = 0
 
     with archive:
         for info in archive.infolist():
@@ -122,24 +232,41 @@ def extract_rules_directory(
             if info.is_dir() or not name.endswith(".yml"):
                 continue
 
-            marker = "/rules/"
+            relative = _validated_relative_path(
+                name,
+                rules_root,
+                resolved_rules_root,
+                zip_path,
+            )
 
-            marker_index = name.find(marker)
-
-            if marker_index < 0:
+            if relative is None:
                 continue
 
-            relative = Path(name[marker_index + len(marker) :])
-
             destination = rules_root / relative
+
+            with archive.open(info) as source:
+                payload = source.read(MAX_RULE_FILE_BYTES + 1)
+
+            if len(payload) > MAX_RULE_FILE_BYTES:
+                raise SigmaImportError(
+                    f"Rule {name!r} in {zip_path} exceeds the "
+                    f"{MAX_RULE_FILE_BYTES}-byte per-file extraction cap"
+                )
+
+            total_extracted_bytes += len(payload)
+
+            if total_extracted_bytes > MAX_TOTAL_EXTRACTED_BYTES:
+                raise SigmaImportError(
+                    f"Archive {zip_path} exceeds the "
+                    f"{MAX_TOTAL_EXTRACTED_BYTES}-byte total extraction cap"
+                )
 
             destination.parent.mkdir(
                 parents=True,
                 exist_ok=True,
             )
 
-            with archive.open(info) as source:
-                destination.write_bytes(source.read())
+            destination.write_bytes(payload)
 
             extracted += 1
 
@@ -255,6 +382,18 @@ def convert_sigma_file(
         )
 
         return None
+    except RecursionError:
+        logger.warning(
+            "Skipping Sigma rule %s: condition nesting exceeds the recursion limit",
+            file_path,
+        )
+
+        summary.record_skip(
+            "recursion-error",
+            f"{file_path}: condition nesting exceeds the recursion limit",
+        )
+
+        return None
 
 
 def convert_directory(
@@ -290,7 +429,34 @@ def _dump_internal_rules(
 
 def _clear_sigma_directory(
     destination: Path,
+    rules_root: Path,
 ) -> None:
+    """Remove the destination ``sigma/`` subtree for a refresh import.
+
+    Refuses (raises :class:`SigmaImportError`) when the destination is a
+    symlink, when any path component between ``rules_root`` and the
+    destination is a symlink, or when the resolved destination lies
+    outside the resolved rules root: deleting through a symlink would
+    remove files outside the rules tree.
+    """
+    if destination.is_symlink():
+        raise SigmaImportError(f"Refusing to clear symlinked Sigma destination: {destination}")
+
+    current = destination.parent
+
+    while current != rules_root and current.parent != current:
+        if current.is_symlink():
+            raise SigmaImportError(
+                f"Refusing to clear Sigma destination {destination}: {current} is a symlink"
+            )
+
+        current = current.parent
+
+    if not destination.resolve().is_relative_to(rules_root.resolve()):
+        raise SigmaImportError(
+            f"Refusing to clear Sigma destination outside {rules_root}: {destination}"
+        )
+
     if not destination.exists():
         return
 
@@ -328,7 +494,7 @@ def write_converted_directory(
     destination = destination_root / "sigma"
 
     if refresh:
-        _clear_sigma_directory(destination)
+        _clear_sigma_directory(destination, destination_root)
 
     written: list[Path] = []
 

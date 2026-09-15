@@ -7,6 +7,8 @@ record built from a ``run_scan`` report.
 """
 
 import json
+import stat
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -108,6 +110,35 @@ def test_append_creates_data_directory_and_file(
 
     assert data_dir.is_dir()
     assert store_path().is_file()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX permission bits",
+)
+def test_append_creates_owner_only_directory_and_file(
+    data_dir,
+) -> None:
+    append_scan_record(
+        make_record(
+            "sc-perms",
+            "2026-09-09T10:00:00+00:00",
+        )
+    )
+
+    assert (
+        stat.S_IMODE(
+            data_dir.stat().st_mode
+        )
+        == 0o700
+    )
+
+    assert (
+        stat.S_IMODE(
+            store_path().stat().st_mode
+        )
+        == 0o600
+    )
 
 
 def test_append_and_list_newest_first(
