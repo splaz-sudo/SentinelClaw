@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+import pytest
+
 from sentinelclaw.config.paths import (
     get_data_directory,
     get_report_directory,
@@ -399,3 +401,122 @@ def test_settings_known_field_sets_are_complete() -> None:
     assert "file_entropy_threshold" in SCALAR_FIELDS
     assert "pcap_port_scan_threshold" in SCALAR_FIELDS
     assert "ollama_timeout" in SCALAR_FIELDS
+    assert "max_intel_bundle_size_bytes" in SCALAR_FIELDS
+
+
+def test_max_intel_bundle_size_default(monkeypatch, tmp_path) -> None:
+    clear_settings_env(monkeypatch)
+
+    settings = load_settings(
+        config_file=tmp_path / "missing.toml"
+    )
+
+    assert settings.max_intel_bundle_size_bytes == 268435456
+
+
+def test_max_intel_bundle_size_toml_override(monkeypatch, tmp_path) -> None:
+    clear_settings_env(monkeypatch)
+
+    config_file = tmp_path / "sentinelclaw.toml"
+
+    config_file.write_text(
+        "max_intel_bundle_size_bytes = 1024\n",
+        encoding="utf-8",
+    )
+
+    settings = load_settings(
+        config_file=config_file
+    )
+
+    assert settings.max_intel_bundle_size_bytes == 1024
+
+
+def test_max_intel_bundle_size_env_beats_toml(monkeypatch, tmp_path) -> None:
+    clear_settings_env(monkeypatch)
+
+    config_file = tmp_path / "sentinelclaw.toml"
+
+    config_file.write_text(
+        "max_intel_bundle_size_bytes = 1024\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv(
+        "SENTINELCLAW_MAX_INTEL_BUNDLE_SIZE_BYTES",
+        "2048",
+    )
+
+    settings = load_settings(
+        config_file=config_file
+    )
+
+    assert settings.max_intel_bundle_size_bytes == 2048
+
+    monkeypatch.delenv(
+        "SENTINELCLAW_MAX_INTEL_BUNDLE_SIZE_BYTES"
+    )
+
+    settings = load_settings(
+        config_file=config_file
+    )
+
+    assert settings.max_intel_bundle_size_bytes == 1024
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "0",
+        "-1",
+        "not-a-number",
+    ),
+)
+def test_max_intel_bundle_size_invalid_env_rejected(
+    monkeypatch,
+    tmp_path,
+    value,
+) -> None:
+    clear_settings_env(monkeypatch)
+
+    monkeypatch.setenv(
+        "SENTINELCLAW_MAX_INTEL_BUNDLE_SIZE_BYTES",
+        value,
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        load_settings(
+            config_file=tmp_path / "missing.toml"
+        )
+
+    assert "SENTINELCLAW_MAX_INTEL_BUNDLE_SIZE_BYTES" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "0",
+        "-1",
+        "true",
+        "\"large\"",
+    ),
+)
+def test_max_intel_bundle_size_invalid_toml_rejected(
+    monkeypatch,
+    tmp_path,
+    value,
+) -> None:
+    clear_settings_env(monkeypatch)
+
+    config_file = tmp_path / "sentinelclaw.toml"
+
+    config_file.write_text(
+        f"max_intel_bundle_size_bytes = {value}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        load_settings(
+            config_file=config_file
+        )
+
+    assert "max_intel_bundle_size_bytes" in str(excinfo.value)

@@ -17,6 +17,16 @@ logger = logging.getLogger(
     __name__
 )
 
+# DoS guard: per-flow DNS/TLS name accumulation uses insertion-ordered
+# dict-as-set membership (O(1) instead of the previous O(n) list scan)
+# and is capped per flow and globally, so a crafted capture with a
+# constant 5-tuple and ever-changing names cannot force quadratic
+# membership scans or unbounded memory. Output order is the insertion
+# order of the first occurrence of each unique name.
+MAX_FLOW_DNS_NAMES = 64
+MAX_FLOW_TLS_SNIS = 64
+MAX_PCAP_FLOW_NAMES = 10000
+
 # scapy classes are resolved lazily so that (a) module import never
 # depends on scapy's dynamic ``scapy.all`` exports (which also keeps
 # static type checks clean), (b) installs without scapy still import,
@@ -295,6 +305,79 @@ def _syn_only_flags(
     return flags_text == "S"
 
 
+class _CappedNameStore:
+    """Insertion-ordered, capped set of DNS qnames or TLS SNIs per flow.
+
+    Membership and insertion both use ``dict[str, None]`` so each lookup
+    is O(1); names are capped per flow and globally. On overflow the
+    offending name is dropped and the store records a truncation reason
+    (surfaced through the analyzer's ``truncated`` / ``truncation_reason``
+    metadata) while the packet loop keeps running normally.
+    """
+
+    def __init__(
+        self,
+        per_flow_cap: int,
+        global_cap: int,
+    ) -> None:
+        self.per_flow_cap = per_flow_cap
+        self.global_cap = global_cap
+
+        self.names: dict[tuple, dict[str, None]] = defaultdict(dict)
+
+        self.total = 0
+        self.truncated = False
+        self.truncation_reason: str | None = None
+
+    def add(
+        self,
+        flow_key: tuple,
+        name: str,
+    ) -> None:
+        known = self.names[flow_key]
+
+        if name in known:
+            return
+
+        if len(known) >= self.per_flow_cap:
+            self._mark_truncated(
+                f"per-flow limit reached ({self.per_flow_cap})"
+            )
+
+            return
+
+        if self.total >= self.global_cap:
+            self._mark_truncated(
+                f"global limit reached ({self.global_cap})"
+            )
+
+            return
+
+        known[name] = None
+        self.total += 1
+
+    def for_flow(
+        self,
+        flow_key: tuple,
+    ) -> list[str]:
+        return list(
+            self.names.get(
+                flow_key,
+                {},
+            )
+        )
+
+    def _mark_truncated(
+        self,
+        reason: str,
+    ) -> None:
+        if self.truncated:
+            return
+
+        self.truncated = True
+        self.truncation_reason = reason
+
+
 def normalize_ip(packet) -> tuple[str | None, str | None]:
     if IP in packet:
         return str(packet[IP].src), str(packet[IP].dst)
@@ -371,8 +454,14 @@ def analyze_pcap(file_path: str) -> dict[str, Any]:
     flow_iat_mean: dict[tuple, float] = {}
     flow_iat_m2: dict[tuple, float] = {}
     flow_flag_counts: dict[tuple, Counter[str]] = defaultdict(Counter)
-    flow_dns_queries: dict[tuple, list[str]] = defaultdict(list)
-    flow_tls_snis: dict[tuple, list[str]] = defaultdict(list)
+    flow_dns_queries = _CappedNameStore(
+        per_flow_cap=MAX_FLOW_DNS_NAMES,
+        global_cap=MAX_PCAP_FLOW_NAMES,
+    )
+    flow_tls_snis = _CappedNameStore(
+        per_flow_cap=MAX_FLOW_TLS_SNIS,
+        global_cap=MAX_PCAP_FLOW_NAMES,
+    )
 
     packets_total = 0
     tcp_packets = 0
@@ -593,38 +682,22 @@ def analyze_pcap(file_path: str) -> dict[str, Any]:
                             flow_key
                         ][tcp_flags] += 1
 
-                    dns_queries = _packet_dns_queries(
+                    for qname in _packet_dns_queries(
                         packet
-                    )
-
-                    for qname in dns_queries:
-                        if (
-                            qname
-                            not in flow_dns_queries[
-                                flow_key
-                            ]
-                        ):
-                            flow_dns_queries[
-                                flow_key
-                            ].append(
-                                qname
-                            )
+                    ):
+                        flow_dns_queries.add(
+                            flow_key,
+                            qname,
+                        )
 
                     sni = _packet_tls_sni(
                         packet
                     )
 
-                    if (
-                        sni
-                        and sni
-                        not in flow_tls_snis[
-                            flow_key
-                        ]
-                    ):
-                        flow_tls_snis[
-                            flow_key
-                        ].append(
-                            sni
+                    if sni:
+                        flow_tls_snis.add(
+                            flow_key,
+                            sni,
                         )
 
                 if len(
@@ -726,13 +799,11 @@ def analyze_pcap(file_path: str) -> dict[str, Any]:
             )
             if flag_counts is not None
             else [],
-            "dns_queries": flow_dns_queries.get(
-                flow_key,
-                [],
+            "dns_queries": flow_dns_queries.for_flow(
+                flow_key
             ),
-            "tls_snis": flow_tls_snis.get(
-                flow_key,
-                [],
+            "tls_snis": flow_tls_snis.for_flow(
+                flow_key
             ),
         }
 
@@ -808,15 +879,26 @@ def analyze_pcap(file_path: str) -> dict[str, Any]:
         )
     ]
 
-    dns_query_count = sum(
-        len(queries)
-        for queries in flow_dns_queries.values()
-    )
+    dns_query_count = flow_dns_queries.total
+    tls_sni_count = flow_tls_snis.total
 
-    tls_sni_count = sum(
-        len(snis)
-        for snis in flow_tls_snis.values()
-    )
+    if flow_dns_queries.truncated and not truncated:
+        truncated = True
+        truncation_reason = (
+            "DNS name "
+            + str(
+                flow_dns_queries.truncation_reason
+            )
+        )
+
+    if flow_tls_snis.truncated and not truncated:
+        truncated = True
+        truncation_reason = (
+            "TLS SNI "
+            + str(
+                flow_tls_snis.truncation_reason
+            )
+        )
 
     logger.debug(
         "Parsed %d packet(s), %d unique flow(s) "
@@ -853,6 +935,8 @@ def analyze_pcap(file_path: str) -> dict[str, Any]:
         "top_destination_ports": top_destination_ports,
         "dns_query_count": dns_query_count,
         "tls_sni_count": tls_sni_count,
+        "dns_names_truncated": flow_dns_queries.truncated,
+        "tls_snis_truncated": flow_tls_snis.truncated,
         "flows": flow_records,
         "tcp_scan_candidates": tcp_scan_candidates,
         "udp_scan_candidates": udp_scan_candidates,

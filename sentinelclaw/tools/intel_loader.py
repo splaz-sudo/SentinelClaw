@@ -55,10 +55,11 @@ entries per indicator type::
 
 Values are normalized (hashes lower-cased hex, domains lower-cased,
 IPs validated) and entries are deduplicated and sorted for
-determinism. A missing/unreadable file, invalid JSON/XML, or a bundle
-that is not an indicator collection yields an *operational error
-dict* (``{"error": "..."}``) instead of raising; callers treat that as
-a skip note, never as a scan failure.
+determinism. A missing/unreadable file, invalid JSON/XML, a bundle
+larger than the ``max_intel_bundle_size_bytes`` setting, or a bundle
+that is not an indicator collection yields an *operational error dict*
+(``{"error": "..."}``) instead of raising; callers treat that as a
+skip note, never as a scan failure.
 
 Matching
 --------
@@ -74,8 +75,15 @@ ever produced (the feature is off by default).
 
 import ipaddress
 import json
+import logging
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
+
+from sentinelclaw.config.settings import get_settings
+
+logger = logging.getLogger(
+    __name__
+)
 
 INTEL_FINDING_IDS = {
     "sha256": "INTEL-001",
@@ -696,6 +704,34 @@ def load_intel_bundle(
             f"Intel bundle is not a file: {path}"
         )
 
+    max_size = (
+        get_settings()
+        .max_intel_bundle_size_bytes
+    )
+
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        return _error(
+            f"Unable to read intel bundle {path}: {exc}"
+        )
+
+    if size > max_size:
+        message = (
+            f"Intel bundle {path} is {size} bytes, "
+            f"which exceeds the {max_size} byte "
+            "size limit"
+        )
+
+        logger.warning(
+            "%s",
+            message,
+        )
+
+        return _error(
+            message
+        )
+
     suffix = path.suffix.lower()
 
     if suffix == ".json":
@@ -709,10 +745,11 @@ def load_intel_bundle(
         )
 
     try:
-        first = path.open(
+        with path.open(
             "r",
             encoding="utf-8",
-        ).read(1)
+        ) as file:
+            first = file.read(1)
     except OSError as exc:
         return _error(
             f"Unable to read intel bundle {path}: {exc}"

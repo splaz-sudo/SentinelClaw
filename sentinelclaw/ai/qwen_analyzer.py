@@ -56,6 +56,16 @@ markdown code fences, containing exactly these keys:
 EVIDENCE_START = "[EVIDENCE_START]"
 EVIDENCE_END = "[EVIDENCE_END]"
 
+# Delimiter-forgery hardening: marker-shaped tokens inside the evidence
+# itself (case-insensitive, tolerant of whitespace variants such as
+# "[EVIDENCE_END ]") are rewritten to visibly-escaped forms before the
+# evidence is wrapped, so hostile text can never terminate a region and
+# place attacker instructions outside the untrusted area.
+_EVIDENCE_MARKER_PATTERN = re.compile(
+    r"\[\s*EVIDENCE\s*(_START|_END)\s*\]",
+    re.IGNORECASE,
+)
+
 # Response fields the model must produce (validated after parsing).
 REQUIRED_RESPONSE_KEYS = (
     "executive_summary",
@@ -411,6 +421,26 @@ def _redact_credentials(
     return text
 
 
+def _escape_evidence_markers(
+    text: str,
+) -> str:
+    """Rewrite forged region delimiters to visibly-escaped variants."""
+
+    def replace(
+        match: re.Match[str],
+    ) -> str:
+        return (
+            "[EVIDENCE"
+            + match.group(1).upper()
+            + "_ESCAPED]"
+        )
+
+    return _EVIDENCE_MARKER_PATTERN.sub(
+        replace,
+        text,
+    )
+
+
 class _BudgetState:
     """Running budget accounting for the evidence payload."""
 
@@ -432,8 +462,12 @@ def _sanitize_evidence_string(
     if not text:
         return ""
 
-    cleaned = _redact_credentials(
+    cleaned = _escape_evidence_markers(
         text
+    )
+
+    cleaned = _redact_credentials(
+        cleaned
     )
 
     cleaned = _neutralize_instruction_tokens(

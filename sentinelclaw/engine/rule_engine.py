@@ -9,9 +9,33 @@ import yaml
 
 from sentinelclaw.config.constants import VALID_SEVERITIES
 
+try:
+    import regex as _regex
+except ImportError:
+    _regex = None
+
 logger = logging.getLogger(
     __name__
 )
+
+# ReDoS guard: rule-supplied regexes (raw Sigma ``|re`` patterns and
+# wildcard-converted patterns) run against hostile evidence. When the
+# ``regex`` package is installed its per-match timeout is authoritative;
+# the searched text is ALWAYS truncated to the input cap as
+# defense-in-depth, and patterns longer than the pattern cap are
+# rejected at validation time. The stdlib ``re`` fallback keeps the
+# truncation but cannot enforce a timeout, so it logs a one-time
+# warning that timeouts are unavailable.
+REGEX_TIMEOUT_SECONDS = 0.5
+MAX_REGEX_INPUT_CHARS = 8192
+MAX_REGEX_PATTERN_CHARS = 512
+
+# Timeout warnings are emitted once per pattern; the tracked set is
+# bounded so a hostile rule pack cannot grow it without bound.
+_MAX_TRACKED_REGEX_TIMEOUT_PATTERNS = 256
+_REGEX_TIMEOUT_PATTERNS: set[str] = set()
+
+_REGEX_FALLBACK_WARNED = False
 
 SUPPORTED_OPERATORS = frozenset(
     {
@@ -441,15 +465,88 @@ def _searchable_text(value: Any) -> str:
     return str(value)
 
 
+def _warn_regex_fallback_once() -> None:
+    """Warn once that the timeout-capable ``regex`` engine is absent."""
+    global _REGEX_FALLBACK_WARNED
+
+    if _REGEX_FALLBACK_WARNED:
+        return
+
+    _REGEX_FALLBACK_WARNED = True
+
+    logger.warning(
+        "regex module is unavailable; rule regexes run with the stdlib "
+        "re engine and cannot be timed out (searched text is truncated "
+        "to %d characters)",
+        MAX_REGEX_INPUT_CHARS,
+    )
+
+
+def _warn_regex_timeout_once(
+    pattern_text: str,
+) -> None:
+    """Warn once per pattern that a regex match hit the timeout."""
+    if pattern_text in _REGEX_TIMEOUT_PATTERNS:
+        return
+
+    if (
+        len(_REGEX_TIMEOUT_PATTERNS)
+        >= _MAX_TRACKED_REGEX_TIMEOUT_PATTERNS
+    ):
+        return
+
+    _REGEX_TIMEOUT_PATTERNS.add(pattern_text)
+
+    logger.warning(
+        "matches: regex timed out after %.1fs for pattern %r; "
+        "treating as a non-match",
+        REGEX_TIMEOUT_SECONDS,
+        pattern_text,
+    )
+
+
 def _regex_search(
     pattern: Any,
     text: str,
 ) -> bool:
+    pattern_text = str(pattern)
+
+    # Defense-in-depth: the engines never see more than the input cap,
+    # even when the timeout is enforced.
+    search_text = text[:MAX_REGEX_INPUT_CHARS]
+
+    if _regex is not None:
+        try:
+            return (
+                _regex.search(
+                    pattern_text,
+                    search_text,
+                    timeout=REGEX_TIMEOUT_SECONDS,
+                )
+                is not None
+            )
+        except TimeoutError:
+            _warn_regex_timeout_once(
+                pattern_text
+            )
+
+            return False
+        except _regex.error as exc:
+            logger.debug(
+                "matches: invalid regex %r (%s)",
+                pattern,
+                exc,
+            )
+
+            return False
+
+    _warn_regex_fallback_once()
+
     try:
         return (
             re.search(
-                str(pattern),
-                text,
+                pattern_text,
+                search_text,
             )
             is not None
         )
@@ -842,9 +939,22 @@ def validate_condition(
         )
 
         for pattern in patterns:
+            pattern_text = str(pattern)
+
+            if (
+                len(pattern_text)
+                > MAX_REGEX_PATTERN_CHARS
+            ):
+                return (
+                    False,
+                    "regex pattern too long "
+                    f"({len(pattern_text)} > "
+                    f"{MAX_REGEX_PATTERN_CHARS} chars)",
+                )
+
             try:
                 re.compile(
-                    str(pattern)
+                    pattern_text
                 )
             except re.error as exc:
                 return (

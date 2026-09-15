@@ -17,6 +17,7 @@ dependencies = [
     "psutil>=6.0.0",
     "pywin32>=311; platform_system == 'Windows'",
     "PyYAML>=6.0.2",
+    "regex>=2024.5.15",
 ]
 
 [project.optional-dependencies]

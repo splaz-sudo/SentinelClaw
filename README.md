@@ -918,6 +918,7 @@ SentinelClaw should provide evidence and investigation context while leaving con
 ```text
 SentinelClaw/
 │
+├── .github/            # CI workflows (lint, typecheck, tests, build)
 ├── sentinelclaw/
 │   ├── ai/
 │   ├── commands/       # CLI command modules (P6-30)
@@ -931,8 +932,7 @@ SentinelClaw/
 │   ├── sigma/          # SigmaHQ importer/reader
 │   ├── state/          # scan-state store + hunting commands
 │   ├── tools/
-│   ├── ui/
-│   └── utils/
+│   └── ui/
 │
 ├── rules/              # detection-rule source of truth (synced to package)
 ├── packaging/          # PyInstaller spec + packaging docs

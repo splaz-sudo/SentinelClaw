@@ -12,6 +12,8 @@ from sentinelclaw.ai.qwen_analyzer import analyze_report_with_qwen
 
 from sentinelclaw.config.settings import get_settings
 
+from sentinelclaw.ui.console import sanitize_terminal_text
+
 
 COMMANDS = ("investigate",)
 
@@ -58,7 +60,7 @@ def print_ai_investigation(
     print(f"Risk: {report['risk']['score']}/100 ({report['risk']['level'].upper()})")
 
     print()
-    print(f"Starting optional local AI analysis with {model}...")
+    print(f"Starting optional local AI analysis with {sanitize_terminal_text(model)}...")
 
     try:
         ai_result = analyze_report_with_qwen(
@@ -69,7 +71,7 @@ def print_ai_investigation(
         print()
         print("[AI UNAVAILABLE]")
 
-        print(str(exc))
+        print(sanitize_terminal_text(exc))
 
         print()
         print("The SentinelClaw deterministic security scan completed successfully.")
@@ -79,7 +81,7 @@ def print_ai_investigation(
         return
     except Exception as exc:
         print()
-        print(f"[AI ERROR] {exc}")
+        print(f"[AI ERROR] {sanitize_terminal_text(exc)}")
 
         print("The deterministic scan results remain valid.")
 
@@ -91,10 +93,10 @@ def print_ai_investigation(
     print("=" * 72)
     print()
 
-    print(f"Model: {ai_result['model']}")
+    print(f"Model: {sanitize_terminal_text(ai_result['model'])}")
 
     print()
-    print(ai_result["analysis"])
+    print(sanitize_terminal_text(ai_result["analysis"]))
 
     print()
     print("=" * 72)
